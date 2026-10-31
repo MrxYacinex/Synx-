@@ -1,0 +1,29 @@
+{
+  "name": "synx-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Realtime room server that keeps Synx watch parties in sync",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/server.js",
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/server.js --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.22.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.63.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

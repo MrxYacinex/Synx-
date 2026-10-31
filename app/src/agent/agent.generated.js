@@ -1,6 +1,32 @@
 "use strict";
 (() => {
   // src/shared/reel.ts
+  var PLATFORMS = {
+    instagram: {
+      id: "instagram",
+      label: "Instagram Reels",
+      homeUrl: "https://www.instagram.com/reels/",
+      loginUrl: "https://www.instagram.com/accounts/login/?next=%2Freels%2F",
+      hosts: ["instagram.com", "cdninstagram.com", "facebook.com", "fbcdn.net"],
+      accent: "#E1306C"
+    },
+    tiktok: {
+      id: "tiktok",
+      label: "TikTok",
+      homeUrl: "https://www.tiktok.com/foryou",
+      loginUrl: "https://www.tiktok.com/login?redirect_url=https%3A%2F%2Fwww.tiktok.com%2Fforyou",
+      hosts: ["tiktok.com", "tiktokcdn.com", "tiktokv.com", "ttwstatic.com", "byteoversea.com", "tiktokcdn-us.com"],
+      accent: "#25F4EE"
+    },
+    youtube: {
+      id: "youtube",
+      label: "YouTube Shorts",
+      homeUrl: "https://m.youtube.com/shorts/",
+      loginUrl: "https://m.youtube.com/shorts/",
+      hosts: ["youtube.com", "youtu.be", "ytimg.com", "googlevideo.com", "google.com", "gstatic.com", "accounts.google.com"],
+      accent: "#FF0033"
+    }
+  };
   var PATTERNS = [
     // instagram.com/reel/<code>/, /reels/<code>/, /p/<code>/, /<user>/reel/<code>/
     { platform: "instagram", host: /(^|\.)instagram\.com$/, path: /\/(?:reels?|p)\/(?!audio\/|explore\/)([A-Za-z0-9_-]{6,})/ },
@@ -74,6 +100,7 @@
   var AGENT_VERSION = 1;
   var TICK_MS = 200;
   var GESTURE_WINDOW = 2500;
+  var REEL_GESTURE_WINDOW = 8e3;
   var NAV_RETRY_MS = 7e3;
   var MAX_NAV_ATTEMPTS = 3;
   var AUTHORITY_MS = 1500;
@@ -115,13 +142,36 @@
       }
     }
     function log(msg) {
-      if (config.debug) post({ type: "log", msg });
+      if (!config.debug) return;
+      console.log("[synx] " + msg);
+      post({ type: "log", msg });
     }
     let lastGestureType = "";
+    const GESTURE_KEY = "synx-gesture";
+    let lastStored = 0;
+    const storeGesture = (t) => {
+      try {
+        sessionStorage.setItem(GESTURE_KEY, String(t));
+      } catch {
+      }
+    };
+    try {
+      lastGesture = Number(sessionStorage.getItem(GESTURE_KEY)) || 0;
+    } catch {
+    }
+    const resetGesture = () => {
+      lastGesture = 0;
+      storeGesture(0);
+    };
     const markGesture = (e) => {
       lastGesture = now();
       lastGestureType = e.type + (e.isTrusted ? "" : "(synthetic)");
+      if (lastGesture - lastStored > 500) {
+        lastStored = lastGesture;
+        storeGesture(lastGesture);
+      }
     };
+    window.addEventListener("pagehide", () => lastGesture && storeGesture(lastGesture));
     for (const ev of ["touchstart", "touchmove", "pointerdown", "mousedown", "wheel", "keydown"]) {
       window.addEventListener(ev, markGesture, { capture: true, passive: true });
     }
@@ -168,14 +218,70 @@
       }
       return null;
     }
+    const ID_KEYS = {
+      instagram: { keys: ["code", "shortcode"], re: /^[A-Za-z0-9_-]{9,40}$/ },
+      tiktok: { keys: ["videoId", "itemId", "aweme_id", "id"], re: /^\d{15,21}$/ }
+    };
+    const fiberCache = /* @__PURE__ */ new WeakMap();
+    function reelFromReact(video) {
+      var _a2;
+      const spec = ID_KEYS[config.platform];
+      if (!spec) return null;
+      const src = video.currentSrc || video.src || "";
+      const cached = fiberCache.get(video);
+      if (cached && cached.src === src && now() - cached.at < 1e3) {
+        return cached.id ? { platform: config.platform, id: cached.id, url: canonicalReelUrl(config.platform, cached.id) } : null;
+      }
+      let id = null;
+      try {
+        const anyVideo = video;
+        const fk = Object.keys(anyVideo).find((k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"));
+        let f = fk ? anyVideo[fk] : null;
+        const seen = /* @__PURE__ */ new WeakSet();
+        let budget = 4e3;
+        const scan = (o, depth) => {
+          if (!o || typeof o !== "object" || depth > 4 || seen.has(o) || budget-- <= 0) return null;
+          seen.add(o);
+          for (const k of Object.keys(o)) {
+            if (k === "children" || k === "_owner" || k === "ref") continue;
+            let val;
+            try {
+              val = o[k];
+            } catch {
+              continue;
+            }
+            if (typeof val === "string" && spec.keys.includes(k) && spec.re.test(val)) return val;
+            if (val && typeof val === "object" && !(val instanceof Node)) {
+              const r = scan(val, depth + 1);
+              if (r) return r;
+            }
+          }
+          return null;
+        };
+        for (let i = 0; f && i < 60 && !id; i++, f = (_a2 = f.return) != null ? _a2 : null) id = scan(f.memoizedProps, 0);
+      } catch {
+        id = null;
+      }
+      fiberCache.set(video, { id, at: now(), src });
+      return id ? { platform: config.platform, id, url: canonicalReelUrl(config.platform, id) } : null;
+    }
     function currentReel(video) {
+      const fromReact = video ? reelFromReact(video) : null;
+      if (fromReact) return fromReact;
       const fromUrl = parseReelUrl(location.href);
       if (fromUrl && fromUrl.platform === config.platform) return fromUrl;
       return video ? reelFromDom(video) : null;
     }
     function isLoginPage() {
-      return /\/(accounts\/login|login|signin|challenge)/i.test(location.pathname) || location.hostname.startsWith("accounts.");
+      if (/\/(accounts\/login|accounts\/emailsignup|login|signup|signin|challenge)/i.test(location.pathname) || location.hostname.startsWith("accounts.")) return true;
+      for (const d of Array.from(document.querySelectorAll('[role="dialog"]'))) {
+        if (visibleFraction(d) < 0.15) continue;
+        const text = (d.textContent || "").slice(0, 400);
+        if (/(in the app|log in|sign up|continue with)/i.test(text)) return true;
+      }
+      return false;
     }
+    const isPlatformRoot = () => /^\/(accounts\/onetap\/?)?$/.test(location.pathname) && location.hostname.includes(config.platform === "youtube" ? "youtube" : config.platform);
     const finiteDuration = (v) => v && Number.isFinite(v.duration) && v.duration > 0 ? v.duration : null;
     function setRate(v, rate) {
       if (Math.abs(v.playbackRate - rate) < 1e-3) return;
@@ -373,8 +479,9 @@
       if (isLoginPage()) return "login";
       if (reel && (!r.reel || reel.id !== r.reel.id)) {
         const noClipYet = !r.reel;
-        const userScrolled = userActive() && !forceRejoin;
-        if (v && (noClipYet || userScrolled)) {
+        const userScrolled = userActive(REEL_GESTURE_WINDOW) && !forceRejoin;
+        if (noClipYet || userScrolled) {
+          if (!v) return "syncing";
           publish(snapshot(v, "reel", { reel, position: v.currentTime || 0, playing: noClipYet ? !v.paused || r.playing : true }));
           return "synced";
         }
@@ -383,7 +490,15 @@
         return navigateTo(r.reel);
       }
       if (!reel) {
-        if (!r.reel) return v ? "no-clip" : "waiting";
+        if (!r.reel) {
+          if (isPlatformRoot() && !userActive(AWAY_WINDOW) && now() - lastNavAt > NAV_RETRY_MS) {
+            lastNavAt = now();
+            navigating = true;
+            location.href = PLATFORMS[config.platform].homeUrl;
+            return "navigating";
+          }
+          return v ? "no-clip" : "waiting";
+        }
         if (userActive(AWAY_WINDOW) && !forceRejoin) return "away";
         return navigateTo(r.reel);
       }
@@ -402,7 +517,8 @@
         return "synced";
       }
       const c = planCorrection(diff, target, r.playing && !v.paused, r.rate, nudging);
-      if (c.kind === "seek" && !v.seeking && !recentlySelf("seek", 700)) {
+      const canSeek = !v.seeking && !recentlySelf("seek", 700) && (v.readyState >= 2 || !r.playing);
+      if (c.kind === "seek" && canSeek) {
         log(`seek ${v.currentTime.toFixed(2)} -> ${c.to.toFixed(2)} (diff ${diff.toFixed(2)})`);
         doSeek(v, c.to);
         nudging = false;
@@ -421,7 +537,7 @@
       if (msg.action === "rejoin") {
         forceRejoin = true;
         lastNavAt = 0;
-        lastGesture = 0;
+        resetGesture();
         try {
           sessionStorage.removeItem("synx-nav");
         } catch {
@@ -446,9 +562,9 @@
           offset = msg.offset;
           const prev = room;
           room = msg.state;
-          if (((_a2 = prev == null ? void 0 : prev.reel) == null ? void 0 : _a2.id) !== ((_b = room.reel) == null ? void 0 : _b.id) && room.by !== config.clientId) {
+          if (prev && ((_a2 = prev.reel) == null ? void 0 : _a2.id) !== ((_b = room.reel) == null ? void 0 : _b.id) && room.by !== config.clientId) {
             lastNavAt = 0;
-            lastGesture = 0;
+            resetGesture();
           }
           tick();
           break;

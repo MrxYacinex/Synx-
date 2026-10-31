@@ -14,7 +14,7 @@ import { SyncClient } from '../../app/src/shared/client';
 import { AgentSession } from '../../app/src/shared/session';
 import { PLATFORMS } from '../../app/src/shared/reel';
 import type { PlatformId } from '../../app/src/shared/protocol';
-import { installMockSites, IG_IDS, TT_IDS } from './mock-sites';
+import { installMockSites, IG_IDS, TT_IDS, type MockOptions } from './mock-sites';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const AGENT = readFileSync(resolve(here, '../../app/src/agent/agent.generated.js'), 'utf8');
@@ -60,20 +60,73 @@ interface Phone {
 }
 
 /** Simulates the app: what app/src/... does with a WebView, but with Playwright. */
-async function openPhone(name: string, platform: PlatformId, order: number[], join: { create: PlatformId } | { room: string }): Promise<Phone> {
+interface NetOpts {
+  /** This phone's clock is off by this many ms (like a real phone with a wrong clock). */
+  skewMs?: number;
+  /** One-way network latency in ms, plus random jitter. */
+  latencyMs?: number;
+  jitterMs?: number;
+  site?: MockOptions;
+}
+
+/** A WebSocket that delivers every message late (in order), like a slow mobile network. */
+function laggyWebSocket(latency: number, jitter: number) {
+  return class LaggyWS {
+    private ws: WebSocket;
+    private lastOut = 0;
+    private lastIn = 0;
+    onopen: ((e: unknown) => void) | null = null;
+    onclose: ((e: unknown) => void) | null = null;
+    onerror: ((e: unknown) => void) | null = null;
+    onmessage: ((e: { data: unknown }) => void) | null = null;
+    constructor(url: string) {
+      this.ws = new WebSocket(url);
+      this.ws.onopen = (e) => setTimeout(() => this.onopen?.(e), latency);
+      this.ws.onclose = (e) => setTimeout(() => this.onclose?.(e), latency);
+      this.ws.onerror = (e) => this.onerror?.(e);
+      this.ws.onmessage = (e) => {
+        const at = Math.max(this.lastIn + 1, Date.now() + latency + Math.random() * jitter);
+        this.lastIn = at;
+        setTimeout(() => this.onmessage?.({ data: e.data }), at - Date.now());
+      };
+    }
+    get readyState() {
+      return this.ws.readyState;
+    }
+    send(data: string) {
+      const at = Math.max(this.lastOut + 1, Date.now() + latency + Math.random() * jitter);
+      this.lastOut = at;
+      setTimeout(() => this.ws.readyState === 1 && this.ws.send(data), at - Date.now());
+    }
+    close() {
+      this.ws.close();
+    }
+  };
+}
+
+async function openPhone(name: string, platform: PlatformId, order: number[], join: { create: PlatformId } | { room: string }, net: NetOpts = {}): Promise<Phone> {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: false });
-  await installMockSites(ctx, order);
-  const client = new SyncClient({ url: `ws://127.0.0.1:${srv.port}`, clientId: `phone_${name}`, name });
+  await installMockSites(ctx, order, net.site);
+  const skew = net.skewMs ?? 0;
+  const client = new SyncClient({
+    url: `ws://127.0.0.1:${srv.port}`,
+    clientId: `phone_${name}`,
+    name,
+    now: () => Date.now() + skew,
+    WebSocketImpl: net.latencyMs ? (laggyWebSocket(net.latencyMs, net.jitterMs ?? 0) as never) : undefined,
+  });
   const logs: string[] = [];
   let page: Page;
   const session = new AgentSession(client, (js) => void page?.evaluate(js).catch(() => {}), { log: (m) => (logs.push(m), process.env.DEBUG_SYNX && console.log(`[${name}] ${m}`)) });
   await ctx.exposeBinding('__synxToApp', (_src, data: string) => session.handleMessage(data));
+  if (skew) await ctx.addInitScript(`(function(){var n=Date.now.bind(Date);Date.now=function(){return n()+${skew}};})();`);
   await ctx.addInitScript(
     `window.__SYNX_CONFIG__=${JSON.stringify({ platform, clientId: client.clientId, sound: false, debug: true })};` +
       `window.ReactNativeWebView={postMessage:function(d){window.__synxToApp(d)}};` +
       AGENT,
   );
   page = await ctx.newPage();
+  if (process.env.DEBUG_SYNX) page.on('console', (m) => m.text().startsWith('[synx]') && console.log(`  (${name} console) ${m.text()}`));
   client.join(join);
   await until(() => client.status, (s) => s === 'connected', 5000, `${name} connected`);
   // Like the app: open the room's clip if there is one, else the platform home.
@@ -237,14 +290,15 @@ test('tiktok-style feed (URL never changes, id only in the DOM) still syncs scro
 });
 
 test('a friend browsing a profile is not yanked back, and can rejoin', async () => {
-  const a = await openPhone('una', 'instagram', [1, 2, 3, 4], { create: 'instagram' });
+  const a = await openPhone('una', 'instagram', [1, 2, 3, 4], { create: 'instagram' }, { site: { igUrlUpdates: true } });
   await until(() => a.client.state.reel?.id, (id) => id === IG_IDS[0], 8000, 'first reel');
-  const b = await openPhone('vic', 'instagram', [2, 1, 3, 4], { room: a.client.room! });
+  const b = await openPhone('vic', 'instagram', [2, 1, 3, 4], { room: a.client.room! }, { site: { igUrlUpdates: true } });
   await expectInSync(a, b, { paused: false });
 
   // Vic taps into a profile page (not a clip).
   await b.page.mouse.click(10, 10);
-  await b.page.goto('https://www.instagram.com/someone/').catch(() => {});
+  await b.page.goto('https://www.instagram.com/someone/').catch((e) => console.log('goto failed', e.message.slice(0, 200)));
+  if (process.env.DEBUG_SYNX) console.log('vic at', b.page.url());
   await b.page.evaluate(() => {
     history.replaceState(null, '', '/someone/');
     window.dispatchEvent(new Event('pointerdown'));
@@ -255,4 +309,49 @@ test('a friend browsing a profile is not yanked back, and can rejoin', async () 
 
   b.session.rejoin();
   await expectInSync(a, b, { paused: false, ms: 12_000 });
+});
+
+test('slow network (150ms ± 60ms each way) and phones whose clocks are seconds apart', async () => {
+  const ana = await openPhone('far-ana', 'instagram', [1, 2, 3, 4], { create: 'instagram' }, { skewMs: -4200, latencyMs: 150, jitterMs: 60 });
+  await until(() => ana.client.state.reel?.id, (id) => id === IG_IDS[0], 8000, 'first reel');
+  const ben = await openPhone('far-ben', 'instagram', [2, 3, 4, 1], { room: ana.client.room! }, { skewMs: 7300, latencyMs: 150, jitterMs: 60 });
+  await sleep(2500); // let the clock estimate settle
+  // Page clocks are skewed, so compare with the *real* time: undo the skew in the gap computation.
+  const realGap = async (rate: number) => {
+    const [x, y] = await Promise.all([look(ana), look(ben)]);
+    const xr = x.wall + 4200; // real ms
+    const yr = y.wall - 7300;
+    const playing = !x.paused && !y.paused;
+    let d = x.t + (playing ? ((yr - xr) / 1000) * rate : 0) - y.t;
+    const dur = x.dur || 12;
+    d = ((((d + dur / 2) % dur) + dur) % dur) - dur / 2;
+    return { d: Math.abs(d), x, y };
+  };
+  await until(() => realGap(1), ({ d, x, y }) => x.id === y.id && !x.paused && !y.paused && d < 0.25, 10_000, 'in sync despite skew');
+  console.log(`  clock offsets: ana ${Math.round(ana.client.clock.offset)}ms (true 4200), ben ${Math.round(ben.client.clock.offset)}ms (true -7300)`);
+  assert.ok(Math.abs(ana.client.clock.offset - 4200) < 120);
+  assert.ok(Math.abs(ben.client.clock.offset + 7300) < 120);
+
+  await ana.page.mouse.click(195, 420);
+  await until(() => realGap(1), ({ d, x, y }) => x.paused && y.paused && d < 0.1, 6000, 'paused together');
+  await ben.page.mouse.click(195, 420);
+  ben.session.setRate(2);
+  await until(() => realGap(2), ({ d, x, y }) => !x.paused && !y.paused && d < 0.25 && Math.abs(x.rate - 2) < 0.3, 8000, '2x together');
+  await swipeUp(ben);
+  const r = await until(() => realGap(2), ({ d, x, y }) => x.id === y.id && !x.paused && d < 0.25, 12_000, 'scroll followed');
+  assert.equal(r.x.id, IG_IDS[1]); // Ben's feed: [opened reel 1], then 2, 3, 4
+  const samples: number[] = [];
+  for (let i = 0; i < 10; i++) {
+    samples.push((await realGap(2)).d);
+    await sleep(400);
+  }
+  console.log(`  drift on slow network: max ${Math.round(Math.max(...samples) * 1000)}ms`);
+  assert.ok(Math.max(...samples) < 0.35);
+});
+
+test('logged-out wall is reported as "login" and nobody gets dragged around', async () => {
+  const a = await openPhone('wall-a', 'instagram', [1, 2, 3, 4], { create: 'instagram' }, { site: { loggedOutWall: true } });
+  await until(() => a.session.status?.mode, (m) => m === 'login', 6000, 'login mode');
+  await sleep(1000);
+  assert.equal(a.client.state.reel, null); // nothing published from behind the wall
 });

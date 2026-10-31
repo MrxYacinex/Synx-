@@ -14,7 +14,7 @@
  */
 import type { AgentConfig, AgentStatus, FromAgent, ToAgent } from '../shared/bridge';
 import type { PlaybackState, PlaybackUpdate, Reel, StateCause } from '../shared/protocol';
-import { parseReelUrl, canonicalReelUrl } from '../shared/reel';
+import { parseReelUrl, canonicalReelUrl, PLATFORMS } from '../shared/reel';
 import { expectedPosition, loopDiff, planCorrection } from '../shared/sync';
 
 declare global {
@@ -29,6 +29,8 @@ const AGENT_VERSION = 1;
 const TICK_MS = 200;
 /** A page event counts as "the user did it" if they touched the page this recently. */
 const GESTURE_WINDOW = 2500;
+/** Swiping to the next clip can take a while to show up on slow networks. */
+const REEL_GESTURE_WINDOW = 8000;
 /** After a remote-triggered navigation, how long to wait before trying again. */
 const NAV_RETRY_MS = 7000;
 const MAX_NAV_ATTEMPTS = 3;
@@ -80,15 +82,42 @@ const AWAY_WINDOW = 15_000;
     }
   }
   function log(msg: string) {
-    if (config.debug) post({ type: 'log', msg });
+    if (!config.debug) return;
+    console.log('[synx] ' + msg);
+    post({ type: 'log', msg });
   }
 
   // --------------------------------------------------------- gesture tracking
   let lastGestureType = '';
+  // Remember touches across full page loads in this tab, so tapping a link that
+  // reloads the page still counts as "the user went there on purpose".
+  const GESTURE_KEY = 'synx-gesture';
+  let lastStored = 0;
+  const storeGesture = (t: number) => {
+    try {
+      sessionStorage.setItem(GESTURE_KEY, String(t));
+    } catch {
+      /* storage blocked */
+    }
+  };
+  try {
+    lastGesture = Number(sessionStorage.getItem(GESTURE_KEY)) || 0;
+  } catch {
+    /* storage blocked */
+  }
+  const resetGesture = () => {
+    lastGesture = 0;
+    storeGesture(0);
+  };
   const markGesture = (e: Event) => {
     lastGesture = now();
     lastGestureType = e.type + (e.isTrusted ? '' : '(synthetic)');
+    if (lastGesture - lastStored > 500) {
+      lastStored = lastGesture;
+      storeGesture(lastGesture);
+    }
   };
+  window.addEventListener('pagehide', () => lastGesture && storeGesture(lastGesture));
   for (const ev of ['touchstart', 'touchmove', 'pointerdown', 'mousedown', 'wheel', 'keydown'] as const) {
     window.addEventListener(ev, markGesture, { capture: true, passive: true });
   }
@@ -143,15 +172,82 @@ const AWAY_WINDOW = 15_000;
     return null;
   }
 
+  /**
+   * Instagram (and TikTok) render with React. The clip component that owns a
+   * <video> carries the clip's id in its props, e.g. Instagram's
+   * `…media_identifier.code = "DfFNtKPNr6F"`. Walking up from the video to the
+   * nearest such prop tells us exactly which clip is on screen, even when the
+   * site doesn't update the URL while you scroll (Instagram doesn't).
+   */
+  const ID_KEYS: Partial<Record<AgentConfig['platform'], { keys: string[]; re: RegExp }>> = {
+    instagram: { keys: ['code', 'shortcode'], re: /^[A-Za-z0-9_-]{9,40}$/ },
+    tiktok: { keys: ['videoId', 'itemId', 'aweme_id', 'id'], re: /^\d{15,21}$/ },
+  };
+  const fiberCache = new WeakMap<HTMLVideoElement, { id: string | null; at: number; src: string }>();
+
+  function reelFromReact(video: HTMLVideoElement): Reel | null {
+    const spec = ID_KEYS[config.platform];
+    if (!spec) return null;
+    const src = video.currentSrc || video.src || '';
+    const cached = fiberCache.get(video);
+    if (cached && cached.src === src && now() - cached.at < 1000) {
+      return cached.id ? { platform: config.platform, id: cached.id, url: canonicalReelUrl(config.platform, cached.id) } : null;
+    }
+    let id: string | null = null;
+    try {
+      const anyVideo = video as unknown as Record<string, unknown>;
+      const fk = Object.keys(anyVideo).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+      type Fiber = { memoizedProps?: unknown; return?: Fiber | null };
+      let f = fk ? (anyVideo[fk] as Fiber | null) : null;
+      const seen = new WeakSet<object>();
+      let budget = 4000; // keep this cheap even on huge prop trees
+      const scan = (o: unknown, depth: number): string | null => {
+        if (!o || typeof o !== 'object' || depth > 4 || seen.has(o) || budget-- <= 0) return null;
+        seen.add(o);
+        for (const k of Object.keys(o)) {
+          if (k === 'children' || k === '_owner' || k === 'ref') continue;
+          let val: unknown;
+          try {
+            val = (o as Record<string, unknown>)[k];
+          } catch {
+            continue;
+          }
+          if (typeof val === 'string' && spec.keys.includes(k) && spec.re.test(val)) return val;
+          if (val && typeof val === 'object' && !(val instanceof Node)) {
+            const r = scan(val, depth + 1);
+            if (r) return r;
+          }
+        }
+        return null;
+      };
+      for (let i = 0; f && i < 60 && !id; i++, f = f.return ?? null) id = scan(f.memoizedProps, 0);
+    } catch {
+      id = null;
+    }
+    fiberCache.set(video, { id, at: now(), src });
+    return id ? { platform: config.platform, id, url: canonicalReelUrl(config.platform, id) } : null;
+  }
+
   function currentReel(video: HTMLVideoElement | null): Reel | null {
+    const fromReact = video ? reelFromReact(video) : null;
+    if (fromReact) return fromReact;
     const fromUrl = parseReelUrl(location.href);
     if (fromUrl && fromUrl.platform === config.platform) return fromUrl;
     return video ? reelFromDom(video) : null;
   }
 
   function isLoginPage(): boolean {
-    return /\/(accounts\/login|login|signin|challenge)/i.test(location.pathname) || location.hostname.startsWith('accounts.');
+    if (/\/(accounts\/login|accounts\/emailsignup|login|signup|signin|challenge)/i.test(location.pathname) || location.hostname.startsWith('accounts.')) return true;
+    // Logged-out walls ("Watch this reel in the app" / "Log in to continue") that block the feed.
+    for (const d of Array.from(document.querySelectorAll('[role="dialog"]'))) {
+      if (visibleFraction(d) < 0.15) continue;
+      const text = (d.textContent || '').slice(0, 400);
+      if (/(in the app|log in|sign up|continue with)/i.test(text)) return true;
+    }
+    return false;
   }
+
+  const isPlatformRoot = () => /^\/(accounts\/onetap\/?)?$/.test(location.pathname) && location.hostname.includes(config.platform === 'youtube' ? 'youtube' : config.platform);
 
   // ----------------------------------------------------------- media helpers
   const finiteDuration = (v: HTMLVideoElement | null) => (v && Number.isFinite(v.duration) && v.duration > 0 ? v.duration : null);
@@ -376,9 +472,11 @@ const AWAY_WINDOW = 15_000;
     if (reel && (!r.reel || reel.id !== r.reel.id)) {
       // We are on a different clip than the room.
       const noClipYet = !r.reel;
-      const userScrolled = userActive() && !forceRejoin;
-      if (v && (noClipYet || userScrolled)) {
+      const userScrolled = userActive(REEL_GESTURE_WINDOW) && !forceRejoin;
+      if (noClipYet || userScrolled) {
         // This user moved on (or is the first one here): everyone follows.
+        // Wait until the new clip's player is on screen so we publish its real position.
+        if (!v) return 'syncing';
         publish(snapshot(v, 'reel', { reel, position: v.currentTime || 0, playing: noClipYet ? !v.paused || r.playing : true }));
         return 'synced';
       }
@@ -387,7 +485,16 @@ const AWAY_WINDOW = 15_000;
       return navigateTo(r.reel);
     }
     if (!reel) {
-      if (!r.reel) return v ? 'no-clip' : 'waiting';
+      if (!r.reel) {
+        // Landed on the home feed (e.g. right after logging in): go to the clips feed.
+        if (isPlatformRoot() && !userActive(AWAY_WINDOW) && now() - lastNavAt > NAV_RETRY_MS) {
+          lastNavAt = now();
+          navigating = true;
+          location.href = PLATFORMS[config.platform].homeUrl;
+          return 'navigating';
+        }
+        return v ? 'no-clip' : 'waiting';
+      }
       if (userActive(AWAY_WINDOW) && !forceRejoin) return 'away';
       return navigateTo(r.reel);
     }
@@ -413,7 +520,9 @@ const AWAY_WINDOW = 15_000;
       return 'synced';
     }
     const c = planCorrection(diff, target, r.playing && !v.paused, r.rate, nudging);
-    if (c.kind === 'seek' && !v.seeking && !recentlySelf('seek', 700)) {
+    // Don't hammer a buffering player with seeks; it will be corrected once it plays.
+    const canSeek = !v.seeking && !recentlySelf('seek', 700) && (v.readyState >= 2 || !r.playing);
+    if (c.kind === 'seek' && canSeek) {
       log(`seek ${v.currentTime.toFixed(2)} -> ${c.to.toFixed(2)} (diff ${diff.toFixed(2)})`);
       doSeek(v, c.to);
       nudging = false;
@@ -434,7 +543,7 @@ const AWAY_WINDOW = 15_000;
     if (msg.action === 'rejoin') {
       forceRejoin = true;
       lastNavAt = 0;
-      lastGesture = 0;
+      resetGesture();
       try {
         sessionStorage.removeItem('synx-nav');
       } catch {
@@ -461,9 +570,9 @@ const AWAY_WINDOW = 15_000;
         const prev = room;
         room = msg.state;
         // A clip change from someone else: drop navigation back-off for it.
-        if (prev?.reel?.id !== room.reel?.id && room.by !== config.clientId) {
+        if (prev && prev.reel?.id !== room.reel?.id && room.by !== config.clientId) {
           lastNavAt = 0;
-          lastGesture = 0; // a remote change wins over our last touch
+          resetGesture(); // a remote change wins over our last touch
         }
         tick();
         break;

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
-import type WebView from 'react-native-webview';
+import type { WebViewHandle } from './webview';
 import { SyncClient, type ConnectionStatus } from '../shared/client';
 import { AgentSession } from '../shared/session';
 import type { AgentStatus } from '../shared/bridge';
@@ -52,7 +52,7 @@ function describe(prev: PlaybackState | null, next: PlaybackState, who: string):
   }
 }
 
-export function useRoom(profile: Profile | null, target: JoinTarget | null, webRef: RefObject<WebView | null>) {
+export function useRoom(profile: Profile | null, target: JoinTarget | null, webRef: RefObject<WebViewHandle | null>) {
   const [status, setStatus] = useState<ConnectionStatus>('idle');
   const [room, setRoom] = useState<string | null>(null);
   const [platform, setPlatform] = useState<PlatformId | null>(null);
@@ -104,7 +104,7 @@ export function useRoom(profile: Profile | null, target: JoinTarget | null, webR
         setRoom(room);
         setPlatform(platform);
         setError(null);
-        setInitialUrl((u) => u ?? client.state.reel?.url ?? null ?? '');
+        setInitialUrl((u) => u ?? client.state.reel?.url ?? '');
       },
       members: (ms) => {
         const before = membersRef.current;

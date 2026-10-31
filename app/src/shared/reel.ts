@@ -5,6 +5,8 @@ export interface PlatformInfo {
   label: string;
   /** Where a room starts when nobody has picked a clip yet. */
   homeUrl: string;
+  /** Where to send people who need to sign in. */
+  loginUrl: string;
   /** Hosts the in-app browser is allowed to navigate to (suffix match). */
   hosts: string[];
   accent: string;
@@ -15,6 +17,7 @@ export const PLATFORMS: Record<PlatformId, PlatformInfo> = {
     id: 'instagram',
     label: 'Instagram Reels',
     homeUrl: 'https://www.instagram.com/reels/',
+    loginUrl: 'https://www.instagram.com/accounts/login/?next=%2Freels%2F',
     hosts: ['instagram.com', 'cdninstagram.com', 'facebook.com', 'fbcdn.net'],
     accent: '#E1306C',
   },
@@ -22,6 +25,7 @@ export const PLATFORMS: Record<PlatformId, PlatformInfo> = {
     id: 'tiktok',
     label: 'TikTok',
     homeUrl: 'https://www.tiktok.com/foryou',
+    loginUrl: 'https://www.tiktok.com/login?redirect_url=https%3A%2F%2Fwww.tiktok.com%2Fforyou',
     hosts: ['tiktok.com', 'tiktokcdn.com', 'tiktokv.com', 'ttwstatic.com', 'byteoversea.com', 'tiktokcdn-us.com'],
     accent: '#25F4EE',
   },
@@ -29,6 +33,7 @@ export const PLATFORMS: Record<PlatformId, PlatformInfo> = {
     id: 'youtube',
     label: 'YouTube Shorts',
     homeUrl: 'https://m.youtube.com/shorts/',
+    loginUrl: 'https://m.youtube.com/shorts/',
     hosts: ['youtube.com', 'youtu.be', 'ytimg.com', 'googlevideo.com', 'google.com', 'gstatic.com', 'accounts.google.com'],
     accent: '#FF0033',
   },

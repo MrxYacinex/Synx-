@@ -66,6 +66,16 @@ running Expo.
 
 ## Using it with a friend who isn't next to you
 
+Two things have to be reachable over the internet:
+
+1. **The app itself.** For Expo Go, use the tunnel mode instead of `npm run app`. Both phones can
+   then load the app from anywhere:
+   ```bash
+   npm run app:tunnel     # prints a QR code that works on any network
+   ```
+   (Or build installable apps, see below.)
+2. **The sync server.** Put it online once, as described next.
+
 Put the sync server on the internet once. It's tiny and the free tiers are enough.
 
 **Render (one click):** push this repo to GitHub → render.com → *New → Blueprint* → select the

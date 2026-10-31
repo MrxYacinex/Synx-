@@ -228,8 +228,8 @@ export class SyncClient {
         this.platform = msg.platform;
         this.target = { room: msg.room }; // reconnects rejoin the same room
         this.members = msg.members;
-        // Rough offset until pings refine it.
-        if (!this.clock.ready) this.clock.add(this.now(), msg.serverTime, this.now());
+        // Rough offset until pings refine it (not a real sample: it ignores latency).
+        if (!this.clock.ready) this.clock.seed(msg.serverTime, this.now());
         this.state = msg.state;
         this.setStatus('connected');
         this.emit('welcome', { room: msg.room, platform: msg.platform, you: msg.you });
@@ -283,7 +283,7 @@ export class SyncClient {
       this.send({ t: 'ping', id: ++this.pingId, c0: this.now() });
       this.pingsSent++;
       // Burst at first for a quick, accurate offset, then relax.
-      const next = this.pingsSent < 6 ? 400 : 8000;
+      const next = this.pingsSent < 8 ? 300 : 2500;
       this.pingTimer = setTimeout(tick, next);
     };
     tick();

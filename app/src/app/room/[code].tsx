@@ -79,7 +79,8 @@ export default function RoomScreen() {
     if (!profile || !platform) return '';
     const config: AgentConfig = { platform, clientId: profile.clientId, sound: profile.sound, debug: __DEV__ };
     return `window.__SYNX_CONFIG__=${JSON.stringify(config)};\n${AGENT_SOURCE}\ntrue;`;
-  }, [profile, platform]);
+    // Only rebuild (and so re-inject) when something the page agent uses changes.
+  }, [profile?.clientId, profile?.sound, platform]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onShouldStart = useCallback(
     (req: ShouldStartLoadRequest) => {

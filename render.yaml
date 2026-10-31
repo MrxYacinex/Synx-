@@ -1,0 +1,11 @@
+# One-click deploy of the Synx sync server on Render (free plan works).
+# Dashboard -> New -> Blueprint -> pick this repo.
+services:
+  - type: web
+    name: synx-server
+    runtime: docker
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true

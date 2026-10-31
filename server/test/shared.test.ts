@@ -65,9 +65,9 @@ test('planCorrection: seek on big drift, nudge on small, nothing when close', ()
   assert.ok(n.kind === 'nudge' && n.rate > 1 && n.rate <= 1.12 + 1e-9);
   const behind = planCorrection(-0.3, 10, true, 2, false);
   assert.ok(behind.kind === 'nudge' && behind.rate < 2);
-  assert.equal(planCorrection(0.05, 10, true, 1, false).kind, 'none');
-  assert.equal(planCorrection(0.05, 10, true, 1, true).kind, 'nudge'); // hysteresis
-  assert.equal(planCorrection(0.02, 10, true, 1, true).kind, 'none');
+  assert.equal(planCorrection(0.04, 10, true, 1, false).kind, 'none');
+  assert.equal(planCorrection(0.04, 10, true, 1, true).kind, 'nudge'); // hysteresis
+  assert.equal(planCorrection(0.015, 10, true, 1, true).kind, 'none');
   assert.equal(planCorrection(0.5, 10, false, 1, false).kind, 'seek');
 });
 
@@ -79,4 +79,16 @@ test('ClockSync prefers low-latency samples', () => {
   c.add(4000, 9010, 4020); // rtt 20, offset 5000
   assert.ok(Math.abs(c.offset - 5000) < 250);
   assert.equal(c.rtt, 20);
+});
+
+test('ClockSync: a rough seed is used only until the first real sample', () => {
+  const c = new ClockSync();
+  assert.equal(c.offset, 0);
+  c.seed(10_000, 9_800); // one-way guess, latency unknown
+  assert.equal(c.offset, 200);
+  c.add(1000, 1300, 1200); // rtt 200 -> offset 200 exactly... use a different true offset
+  c.reset();
+  c.seed(10_000, 9_800);
+  c.add(1000, 1350, 1100); // true offset 300
+  assert.equal(c.offset, 300); // the seed no longer biases the estimate
 });

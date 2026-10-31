@@ -1,0 +1,12 @@
+{
+  "name": "synx-monorepo",
+  "private": true,
+  "description": "Synx – watch Instagram Reels, TikTok and YouTube Shorts together, perfectly in sync",
+  "scripts": {
+    "setup": "npm --prefix server install && npm --prefix app install",
+    "server": "npm --prefix server run dev",
+    "app": "npm --prefix app start",
+    "test": "npm --prefix server test && npm --prefix server run test:e2e",
+    "typecheck": "npm --prefix server run typecheck && npm --prefix app run typecheck"
+  }
+}

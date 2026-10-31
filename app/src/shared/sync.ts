@@ -4,8 +4,8 @@ import type { PlaybackState } from './protocol';
 export const SEEK_THRESHOLD_PLAYING = 0.9;
 export const SEEK_THRESHOLD_PAUSED = 0.08;
 /** Drift (seconds) at which we start / stop nudging the playback rate. */
-export const NUDGE_START = 0.1;
-export const NUDGE_STOP = 0.035;
+export const NUDGE_START = 0.06;
+export const NUDGE_STOP = 0.02;
 export const MAX_NUDGE = 0.12;
 
 /**
@@ -14,7 +14,13 @@ export const MAX_NUDGE = 0.12;
  */
 export class ClockSync {
   private samples: Array<{ offset: number; rtt: number; at: number }> = [];
-  constructor(private readonly maxSamples = 10) {}
+  /** A rough one-way guess (e.g. from a welcome message) used until real pings arrive. */
+  private seedOffset: number | null = null;
+  constructor(private readonly maxSamples = 24) {}
+
+  seed(serverTime: number, localTime: number): void {
+    this.seedOffset = serverTime - localTime;
+  }
 
   add(c0: number, s: number, c1: number): void {
     const rtt = Math.max(0, c1 - c0);
@@ -29,7 +35,7 @@ export class ClockSync {
 
   /** server time ≈ local time + offset */
   get offset(): number {
-    if (!this.samples.length) return 0;
+    if (!this.samples.length) return this.seedOffset ?? 0;
     const sorted = [...this.samples].sort((a, b) => a.rtt - b.rtt);
     const best = sorted.slice(0, Math.min(3, sorted.length));
     return best.reduce((acc, s) => acc + s.offset, 0) / best.length;
@@ -46,6 +52,7 @@ export class ClockSync {
 
   reset(): void {
     this.samples = [];
+    this.seedOffset = null;
   }
 }
 

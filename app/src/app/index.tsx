@@ -162,7 +162,7 @@ const styles = StyleSheet.create({
   divider: { flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: colors.cardBorder },
   or: { color: colors.faint, fontSize: 13 },
   joinRow: { flexDirection: 'row', gap: 10 },
-  codeInput: { flex: 1, fontSize: 24, fontWeight: '800', letterSpacing: 8, textAlign: 'center' },
+  codeInput: { flex: 1, minWidth: 0, fontSize: 24, fontWeight: '800', letterSpacing: 8, textAlign: 'center' },
   joinBtn: {
     height: 54,
     paddingHorizontal: 26,

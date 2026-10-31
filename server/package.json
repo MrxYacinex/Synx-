@@ -10,7 +10,9 @@
     "start": "node dist/server.js",
     "build": "esbuild src/main.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/server.js --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/shared.test.ts test/server.test.ts",
+    "test:e2e": "npm --prefix ../app run build:agent && node --import tsx --test --test-force-exit --test-concurrency=1 test/e2e.test.ts",
+    "probe": "tsx scripts/probe-real-site.ts"
   },
   "engines": {
     "node": ">=20"
